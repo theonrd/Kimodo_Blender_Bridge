@@ -178,7 +178,13 @@ class KIMODO_ConstraintItem(PropertyGroup):
     )
     heading_angle: FloatProperty(
         name="Heading (°)",
-        description="Desired facing direction in degrees (0 = +Y forward in Blender / -Z in Kimodo)",
+        description=(
+            "Desired facing direction. Convention (verified empirically; "
+            "0 = +Y as once claimed here is wrong): 0° = −Y, 90° = +X, "
+            "180° = +Y, 270° = −X — the angle equals atan2(dx, −dy) of the "
+            "facing vector. With Auto Face Path enabled the value is rotated "
+            "along with the waypoints automatically"
+        ),
         default=0.0,
         subtype='ANGLE',
     )
@@ -446,6 +452,23 @@ class KIMODO_SceneSettings(PropertyGroup):
                     "waypoint lands at Kimodo's (0,0) origin.",
         default=False,
     )
+    auto_face_path: BoolProperty(
+        name="Auto Face Path",
+        description=(
+            "Rotate Root XZ waypoints internally so the character starts out "
+            "facing along the path (Kimodo's native start direction) and walks "
+            "forward from frame 1 — no heading warm-up, no manual heading "
+            "angles. The generated motion is rotated back onto your waypoints "
+            "automatically on import. Applies when every enabled constraint is "
+            "a Root XZ waypoint; turn off to send coordinates as-is"
+        ),
+        default=True,
+    )
+    # Canonical rotation applied by the most recent constraint build (radians)
+    # plus the pivot it rotates about. Written at generate time, read by the
+    # BVH import step via the .canonical.json sidecar — informational in the UI.
+    canonical_rot_rad: FloatProperty(default=0.0)
+    canonical_pivot: FloatVectorProperty(size=2, default=(0.0, 0.0))
     constraint_json_preview: StringProperty(
         name="Constraint JSON",
         description="Last-built constraints JSON (read-only preview)",

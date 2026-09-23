@@ -180,6 +180,50 @@ def heading_from_angle(angle_rad: float) -> list[float]:
     return [math.cos(angle_rad), math.sin(angle_rad)]
 
 
+def heading_angle_for_direction(dx: float, dy: float) -> float:
+    """Heading angle (rad) that faces along the direction (dx, dy) in Blender.
+
+    Empirical Kimodo convention (verified against generated motion; the UI
+    tooltip claiming "0 = +Y forward" is wrong): θ = atan2(dx, −dy), i.e.
+    0° faces Blender −Y, 90° faces +X, 180° faces +Y, 270° faces −X.
+    """
+    return math.atan2(dx, -dy)
+
+
+def compute_canonical_rotation(constraint_items) -> "tuple[float, tuple[float, float]]":
+    """Rotation (R, pivot) that maps the first root2d path segment onto the
+    model's canonical start facing (Blender −Y).
+
+    Kimodo always generates the first frames facing its canonical direction
+    (−Y in Blender after BVH import), no matter what the prompt or heading
+    constraints say — a different facing has to be steered in over ~1 s of
+    "warm-up" frames, and a heading that fights the path direction makes the
+    motion degenerate.  Rotating the waypoint positions by R about the first
+    waypoint makes the canonical facing coincide with the direction of
+    travel, so the character walks forward along the path from frame 1 with
+    no warm-up and no heading constraints at all.
+    bake_canonical_inverse_rotation() undoes R when the BVH is imported.
+
+    Returns (0.0, (0, 0)) when no direction can be derived (fewer than two
+    distinct root2d waypoints).
+    """
+    root2d = sorted(
+        (ci for ci in constraint_items
+         if ci.enabled and ci.marker_object and ci.constraint_type == 'root2d'),
+        key=lambda ci: ci.frame,
+    )
+    if len(root2d) < 2:
+        return 0.0, (0.0, 0.0)
+    p0 = root2d[0].marker_object.location
+    for ci in root2d[1:]:
+        p1 = ci.marker_object.location
+        dx, dy = p1.x - p0.x, p1.y - p0.y
+        if math.hypot(dx, dy) > 1e-6:
+            # φ = direction-of-travel angle; canonical facing −Y is φ = −90°.
+            return math.radians(-90.0) - math.atan2(dy, dx), (p0.x, p0.y)
+    return 0.0, (0.0, 0.0)
+
+
 # ---------------------------------------------------------------------------
 # Frame conversion
 # ---------------------------------------------------------------------------
@@ -348,6 +392,7 @@ def build_constraints_json(
     kimodo_fps: float = 30.0,
     auto_canonicalize: bool = True,
     scene_start_override: "int | None" = None,
+    canonical_rotation: bool = False,
 ) -> list[dict]:
     """
     Convert Blender constraint items to Kimodo constraints JSON list.
@@ -358,6 +403,12 @@ def build_constraints_json(
     scene            : bpy.context.scene
     kimodo_fps       : Kimodo's motion FPS (default 30)
     auto_canonicalize: subtract XZ of earliest root waypoint so it lands at (0,0)
+                       (ignored while canonical_rotation is active and applied)
+    canonical_rotation: rotate root2d waypoints about the first one so the
+                       direction of travel matches the model's canonical start
+                       facing — the character walks forward from frame 1 with
+                       no heading warm-up (see compute_canonical_rotation).
+                       Only applies when every enabled constraint is root2d.
 
     Returns
     -------
@@ -378,6 +429,41 @@ def build_constraints_json(
     saved_frame = scene.frame_current
 
     try:
+        # -----------------------------------------------------------------------
+        # Canonical path rotation: rotate all root2d waypoints so the direction
+        # of travel matches the model's canonical start facing (Blender −Y)
+        # AND the first waypoint lands at the model's (0,0) origin — Kimodo is
+        # trained on root-near-origin data, and a path offset by several
+        # meters degrades the gait (swaying path, duck-footed steps).
+        # The inverse (rotate + translate back) is baked into the imported
+        # action (operators._apply_canonical_from_sidecar), so the motion
+        # lands exactly on the authored world-space waypoints.
+        # Only defined when every enabled constraint is a root2d waypoint —
+        # fullbody/effector constraints encode pose orientations that would
+        # have to rotate too, so those runs are left untouched.
+        # -----------------------------------------------------------------------
+        rot_rad = 0.0
+        pivot = (0.0, 0.0)
+        if (canonical_rotation
+                and all(ci.constraint_type == 'root2d' for ci in items)):
+            rot_rad, pivot = compute_canonical_rotation(items)
+            if rot_rad != 0.0:
+                # The transform below already centers the path on the model
+                # origin, which is what auto-canonicalize would want; running
+                # the offset on top would only move the path away from where
+                # the inverse bake expects it — so canonicalize yields.
+                auto_canonicalize = False
+
+        def _rotated_marker_xy(obj):
+            # Model-space ground coords: rotate the offset from the first
+            # waypoint about the origin (direction fix) — the first waypoint
+            # itself maps to (0, 0).
+            dx, dy = obj.location.x - pivot[0], obj.location.y - pivot[1]
+            if abs(rot_rad) > 1e-9:
+                c, s = math.cos(rot_rad), math.sin(rot_rad)
+                dx, dy = c * dx - s * dy, s * dx + c * dy
+            return dx, dy
+
         # -----------------------------------------------------------------------
         # Auto-canonicalization: find the earliest XZ root position and use it
         # as the origin offset so the user can author constraints anywhere.
@@ -425,6 +511,7 @@ def build_constraints_json(
             root_positions: list = []
             local_joints_rot: list = []
             global_root_heading: list = []
+            heading_slots: "list[float | None]" = []
 
             for ci in group:
                 kframe = blender_frame_to_kimodo(ci.frame, scene_start, blender_fps, kimodo_fps)
@@ -432,10 +519,11 @@ def build_constraints_json(
                 obj = ci.marker_object
 
                 if ctype == 'root2d':
-                    pos2d = blender_to_kimodo_2d(obj.location)
+                    x, y = _rotated_marker_xy(obj)
+                    pos2d = [x, -y]
                     smooth_root_2d.append(apply_offset_2d(pos2d))
-                    if ci.include_heading:
-                        global_root_heading.append(heading_from_angle(ci.heading_angle))
+                    heading_slots.append(
+                        ci.heading_angle + rot_rad if ci.include_heading else None)
 
                 elif ctype == 'fullbody':
                     if obj.type == 'ARMATURE':
@@ -491,6 +579,41 @@ def build_constraints_json(
                     smooth_root_2d.append([pos3d[0], pos3d[2]])
                     local_joints_rot.append(jrot)
 
+            if ctype == 'root2d':
+                if rot_rad != 0.0 and any(h is not None for h in heading_slots):
+                    # With the canonical rotation active, headings must cover
+                    # every root2d frame or Kimodo drops the whole list (the
+                    # length guard below).  Fill missing ones from the local
+                    # direction of the rotated path, so forgetting to tick
+                    # "Include Heading" on one waypoint can't silently
+                    # disable the headings on all of them.
+                    n = len(heading_slots)
+                    geom = [0.0] * n
+                    last_geom = 0.0
+                    for i in range(n):
+                        if i + 1 < n:
+                            a, b = smooth_root_2d[i], smooth_root_2d[i + 1]
+                        elif i > 0:
+                            a, b = smooth_root_2d[i - 1], smooth_root_2d[i]
+                        else:
+                            a = b = None
+                        if a is not None:
+                            ddx, ddz = b[0] - a[0], b[1] - a[1]
+                            # θ = atan2(dx, dz) in Kimodo ground coords — the
+                            # same convention as heading_angle_for_direction
+                            # (Kimodo Z = −Blender Y).
+                            if math.hypot(ddx, ddz) > 1e-9:
+                                last_geom = math.atan2(ddx, ddz)
+                        geom[i] = last_geom
+                    global_root_heading = [
+                        heading_from_angle(h if h is not None else geom[i])
+                        for i, h in enumerate(heading_slots)
+                    ]
+                else:
+                    global_root_heading = [
+                        heading_from_angle(h) for h in heading_slots if h is not None
+                    ]
+
             block: dict[str, Any] = {
                 "type": ctype.replace("_", "-"),  # left_hand → left-hand
                 "frame_indices": frame_indices,
@@ -527,7 +650,97 @@ def constraints_to_json_string(
     kimodo_fps: float = 30.0,
     auto_canonicalize: bool = True,
     indent: int = 2,
+    canonical_rotation: bool = False,
 ) -> str:
     """Return the constraints as a formatted JSON string."""
-    data = build_constraints_json(constraint_items, scene, kimodo_fps, auto_canonicalize)
+    data = build_constraints_json(
+        constraint_items, scene, kimodo_fps, auto_canonicalize,
+        canonical_rotation=canonical_rotation)
     return json.dumps(data, indent=indent)
+
+
+# ---------------------------------------------------------------------------
+# Canonical rotation bake (import side)
+# ---------------------------------------------------------------------------
+
+def bake_canonical_inverse_rotation(
+    context,
+    armature_obj: bpy.types.Object,
+    rot_rad: float,
+    pivot_xy: "tuple[float, float]",
+    mode: str = "origin",
+) -> bool:
+    """Undo the canonical path rotation on an imported BVH action.
+
+    The canonical rotation (compute_canonical_rotation) is applied to the
+    constraint JSON only, so the BVH Kimodo generates is in rotated model
+    coordinates.  This bakes the inverse rigid transform into the root
+    bone's keyframes by rewriting each frame's armature-space pose matrix:
+    the action lands back on the authored world-space waypoints and the
+    armature object keeps an identity transform, so retargeting behaves
+    exactly as with any other import.
+
+    Modes (matching how the constraints were sent):
+      * "origin" — p_model = Rot(R)·(p − pivot); inverse is
+        p = Rot(−R)·p_model + pivot.  The model saw the first waypoint at
+        its (0,0) origin; rotate about the action origin, then translate.
+      * "pivot"  — legacy: p_model = pivot + Rot(R)·(p − pivot); inverse is
+        a rotation about the pivot point inside model space.
+
+    Only the root bone is touched — every other bone animates in its
+    parent's local space, so rotating the root rotates the whole chain.
+
+    Idempotent: the action is marked with a custom property so repeat
+    imports of the same file don't rotate twice.
+    """
+    if abs(rot_rad) < 1e-9:
+        return False
+    ad = armature_obj.animation_data
+    act = ad.action if ad else None
+    if act is None or act.get("kimodo_canonical_unrotated"):
+        return False
+
+    root_pb = next((pb for pb in armature_obj.pose.bones if pb.parent is None), None)
+    if root_pb is None:
+        return False
+
+    scene = context.scene
+    saved_frame = scene.frame_current
+
+    # BVH action coordinates ARE the model-space coordinates the constraints
+    # were sent in (the importer builds the armature at the origin), so the
+    # pivot is used directly in armature space.  Deliberately NOT mapped
+    # through matrix_world: a moved or rotated source object changes where
+    # the motion appears in the world, but the action's own coordinates stay
+    # authored-space — and retarget constraints may be pointing at the
+    # object, so we must not "compensate" for its transform here.
+    pivot_arm = mathutils.Vector((pivot_xy[0], pivot_xy[1], 0.0))
+    rot_back = mathutils.Matrix.Rotation(-rot_rad, 4, 'Z')
+    if mode == "origin":
+        M = mathutils.Matrix.Translation(pivot_arm) @ rot_back
+    else:
+        M = (
+            mathutils.Matrix.Translation(pivot_arm)
+            @ rot_back
+            @ mathutils.Matrix.Translation(-pivot_arm)
+        )
+
+    rot_path = {
+        'QUATERNION': 'rotation_quaternion',
+        'AXIS_ANGLE': 'rotation_axis_angle',
+    }.get(root_pb.rotation_mode, 'rotation_euler')
+
+    f_start, f_end = act.frame_range
+    try:
+        for frame in range(int(math.floor(f_start)), int(math.ceil(f_end)) + 1):
+            scene.frame_set(frame)
+            context.view_layer.update()
+            root_pb.matrix = M @ root_pb.matrix
+            root_pb.keyframe_insert(data_path='location', frame=frame)
+            root_pb.keyframe_insert(data_path=rot_path, frame=frame)
+    finally:
+        scene.frame_set(saved_frame)
+        context.view_layer.update()
+
+    act["kimodo_canonical_unrotated"] = True
+    return True

@@ -5,6 +5,7 @@ All N-panel UI panels in the 3D Viewport → Kimodo tab.
 
 import os
 import textwrap
+import math
 
 import bpy
 import json
@@ -616,6 +617,20 @@ class KIMODO_PT_Constraints(KIMODO_PanelBase, Panel):
         row = box.row(align=True)
         row.prop(s, "kimodo_fps")
         row.prop(s, "auto_canonicalize", toggle=True, text="Auto-Origin")
+        box.prop(s, "auto_face_path", toggle=True, text="Auto Face Path")
+        if s.auto_face_path:
+            if abs(s.canonical_rot_rad) > 1e-6:
+                box.label(
+                    text=f"Last gen: waypoints rotated "
+                         f"{math.degrees(s.canonical_rot_rad):.1f}° "
+                         f"(rotated back on import)",
+                    icon='CHECKMARK',
+                )
+            else:
+                box.label(
+                    text="Waypoints face the path natively — nothing to rotate",
+                    icon='INFO',
+                )
 
         layout.separator()
 

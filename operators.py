@@ -324,6 +324,8 @@ class KIMODO_OT_Generate(Operator):
         # Build constraints JSON if any are defined
         constraints_json = None
         enabled_constraints = [c for c in s.motion_constraints if c.enabled and c.marker_object]
+        s.canonical_rot_rad = 0.0
+        s.canonical_pivot = (0.0, 0.0)
         if enabled_constraints:
             try:
                 constraints_data = cmod.build_constraints_json(
@@ -331,9 +333,11 @@ class KIMODO_OT_Generate(Operator):
                     context.scene,
                     kimodo_fps=s.kimodo_fps,
                     auto_canonicalize=s.auto_canonicalize,
+                    canonical_rotation=s.auto_face_path,
                 )
                 constraints_json = json.dumps(constraints_data)
                 s.constraint_json_preview = constraints_json
+                _store_canonical_params(s)
             except Exception as e:
                 self.report({'WARNING'}, f"Constraint build failed (generating without): {e}")
 
@@ -383,6 +387,7 @@ class KIMODO_OT_Generate(Operator):
         elif _generation_state["success"]:
             file_path = _generation_state["result"]
             s.last_bvh_path = file_path
+            _write_canonical_sidecar(s, file_path)
             s.generation_progress = "Done ✓"
             _push_history(s, s.prompt, self._resolved_seed, s.duration, file_path)
             _step_seed_after_generation(s, self._resolved_seed)
@@ -517,6 +522,64 @@ def _apply_to_existing_source(s, new_arm: bpy.types.Object) -> bpy.types.Object:
     return existing
 
 
+def _store_canonical_params(s) -> None:
+    """Record the canonical rotation that build_constraints_json will apply.
+
+    Mirrors the applicability rules inside the builder (auto_face_path on,
+    every enabled constraint a root2d waypoint, a derivable direction) and
+    resets the stored values otherwise, so stale parameters from an earlier
+    generation can never leak into an unconstrained one.
+    """
+    s.canonical_rot_rad = 0.0
+    s.canonical_pivot = (0.0, 0.0)
+    if not s.auto_face_path:
+        return
+    enabled = [c for c in s.motion_constraints if c.enabled and c.marker_object]
+    if not enabled or any(c.constraint_type != 'root2d' for c in enabled):
+        return
+    s.canonical_rot_rad, s.canonical_pivot = cmod.compute_canonical_rotation(enabled)
+
+
+def _write_canonical_sidecar(s, file_path: str) -> None:
+    """Persist the canonical rotation next to the BVH.
+
+    The import step needs (rot, pivot) to bake the inverse rotation, but the
+    BVH may also be imported much later (history re-import).  A sidecar file
+    travels with the BVH itself, so the right parameters are always used.
+    """
+    if abs(s.canonical_rot_rad) < 1e-9:
+        return
+    try:
+        with open(file_path + ".canonical.json", "w", encoding="utf-8") as f:
+            json.dump({"rot_rad": s.canonical_rot_rad,
+                       "pivot": list(s.canonical_pivot),
+                       "mode": "origin"}, f)
+    except OSError:
+        pass
+
+
+def _apply_canonical_from_sidecar(context, bvh_path: str, arm: bpy.types.Object) -> None:
+    """Bake the inverse canonical rotation into a freshly imported action,
+    using the sidecar written at generation time (if any)."""
+    sidecar = bvh_path + ".canonical.json"
+    if not os.path.isfile(sidecar):
+        return
+    try:
+        with open(sidecar, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        rot = float(meta.get("rot_rad", 0.0))
+        pivot = tuple(meta.get("pivot", (0.0, 0.0)))
+        # Sidecars written before the origin-centered conditioning exist
+        # carry no "mode" — treat them as the legacy pivot-rotation bake.
+        mode = str(meta.get("mode", "pivot"))
+        if cmod.bake_canonical_inverse_rotation(context, arm, rot, pivot, mode=mode):
+            print(f"[Kimodo] Canonical rotation baked back into "
+                  f"'{arm.name}' ({-math.degrees(rot):.1f}° about pivot "
+                  f"({pivot[0]:.2f}, {pivot[1]:.2f}))", flush=True)
+    except Exception as e:
+        print(f"[Kimodo] Canonical sidecar apply failed: {e}", flush=True)
+
+
 # ---------------------------------------------------------------------------
 # Import operators
 # ---------------------------------------------------------------------------
@@ -569,6 +632,7 @@ class KIMODO_OT_ImportBVH(Operator):
             new_arm = _apply_to_existing_source(s, new_arm)
             s.source_armature = new_arm
             s.reuse_armature = new_arm
+            _apply_canonical_from_sidecar(context, path, new_arm)
             self.report({'INFO'}, f"Imported '{new_arm.name}' with {len(new_arm.data.bones)} bones")
         else:
             self.report({'WARNING'}, "BVH imported but no armature found in scene.")
@@ -1131,6 +1195,7 @@ class KIMODO_OT_GenerateSegment(Operator):
             seg = s.motion_segments[self._target_segment_idx]
             seg.last_bvh_path = file_path
             seg.generated = True
+            _write_canonical_sidecar(s, file_path)
             s.generation_progress = "Done ✓"
             _push_history(s, seg.prompt, self._resolved_seed, self._segment_duration, file_path)
             _step_seed_after_generation(seg, self._resolved_seed)
@@ -1188,6 +1253,8 @@ def _build_multi_prompt_constraints(context, first_start_frame: int) -> "tuple[s
     """
     s = context.scene.kimodo
     enabled = [c for c in s.motion_constraints if c.enabled and c.marker_object]
+    s.canonical_rot_rad = 0.0
+    s.canonical_pivot = (0.0, 0.0)
     if not enabled:
         return None, None
     try:
@@ -1196,7 +1263,9 @@ def _build_multi_prompt_constraints(context, first_start_frame: int) -> "tuple[s
             kimodo_fps=s.kimodo_fps,
             auto_canonicalize=s.auto_canonicalize,
             scene_start_override=first_start_frame,
+            canonical_rotation=s.auto_face_path,
         )
+        _store_canonical_params(s)
         return (json.dumps(data) if data else None), None
     except Exception as exc:
         return None, str(exc)
@@ -1332,6 +1401,7 @@ class KIMODO_OT_GenerateAllSegments(Operator):
             for seg in generated_segments:
                 seg.last_bvh_path = file_path
                 seg.generated = True
+            _write_canonical_sidecar(s, file_path)
 
             fps = context.scene.render.fps / context.scene.render.fps_base
             prompt = " | ".join(seg.prompt for seg in generated_segments)
@@ -1416,6 +1486,7 @@ class KIMODO_OT_ImportBVHAtFrame(Operator):
             new_arm = _apply_to_existing_source(s, new_arm)
             s.source_armature = new_arm
             s.reuse_armature = new_arm
+            _apply_canonical_from_sidecar(context, self.filepath, new_arm)
 
         return {'FINISHED'}
 
@@ -1439,6 +1510,8 @@ def _build_segment_constraints(context, seg) -> "tuple[str | None, str | None]":
     """
     s = context.scene.kimodo
     enabled = [c for c in s.motion_constraints if c.enabled and c.marker_object]
+    s.canonical_rot_rad = 0.0
+    s.canonical_pivot = (0.0, 0.0)
     if not enabled:
         return None, None
     try:
@@ -1446,7 +1519,9 @@ def _build_segment_constraints(context, seg) -> "tuple[str | None, str | None]":
             s.motion_constraints, context.scene,
             kimodo_fps=s.kimodo_fps,
             auto_canonicalize=s.auto_canonicalize,
+            canonical_rotation=s.auto_face_path,
         )
+        _store_canonical_params(s)
         return json.dumps(data), None
     except Exception as exc:
         return None, str(exc)
@@ -1944,6 +2019,7 @@ class KIMODO_OT_PreviewConstraintsJSON(Operator):
                 context.scene,
                 kimodo_fps=s.kimodo_fps,
                 auto_canonicalize=s.auto_canonicalize,
+                canonical_rotation=s.auto_face_path,
             )
         except Exception as e:
             self.report({'ERROR'}, f"Failed to build JSON: {e}")

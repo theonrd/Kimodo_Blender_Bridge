@@ -149,6 +149,25 @@ To add a constraint:
 
 **Auto-Origin** (off by default) shifts all constraint positions so the earliest root waypoint lands at Kimodo's world origin — author constraints anywhere in your scene without worrying about absolute coordinates.
 
+**Auto Face Path** (on by default, fork feature) makes plain Root XZ waypoints "just work": Kimodo always starts a motion facing its canonical direction (−Y in Blender), so a path authored in any other direction either crab-walked (no headings) or spent ~1 s turning into place (with headings) — and a heading that contradicted the path made the motion degenerate. With Auto Face Path the addon rotates the waypoints so the direction of travel matches the model's native facing, centers the first waypoint on the model's (0,0) origin, and bakes the inverse transform back into the imported action's root bone. The character walks forward along your path from frame 1, the motion lands exactly on your world-space waypoints, and the armature object keeps an identity transform so retargeting is unaffected. The rotation parameters travel in a `.canonical.json` sidecar next to each generated BVH, so re-importing from history un-rotates correctly too. It applies whenever every enabled constraint is a Root XZ waypoint; mixed runs with fullbody/effector constraints are sent as-is. Turn it off to send raw coordinates (and manual headings — see below).
+
+### Headings with Auto Face Path (advanced)
+
+Leave every "Include Heading" unticked and the addon sends no heading constraints at all — thanks to the path rotation the character faces along the path on its own, which is the cleanest conditioning. Ticking "Include Heading" on a waypoint opts into heading steering:
+
+- **Kimodo only accepts a heading for every waypoint or none** — a partial list is silently dropped. With Auto Face Path active the addon fills the gaps automatically: your value on the waypoints you ticked, the local path direction everywhere else (towards the next waypoint; the last waypoint reuses the previous segment). So one ticked heading means "face *this* way here, follow the path elsewhere".
+- Angles are authored in **scene world coordinates**: 0° = −Y, 90° = +X, 180° = +Y, 270° = −X — the angle equals `atan2(dx, −dy)` of the facing vector (the pre-1.6 claim "0 = +Y forward" was wrong). The addon rotates your value along with the waypoints; you never deal with the model's internal frame.
+- Facing **between** waypoints is not controlled — the model interpolates freely. Pin a turn with denser waypoints around it.
+- **Avoid a manual heading on the first waypoint that differs from the path direction**: the model always starts facing its canonical direction, which Auto Face Path aligns with the first path segment — contradicting it reintroduces the warm-up turn, or worse. Corner headings on later waypoints are the intended use ("walk north, then face east here").
+- A heading pointing across or against the direction of travel is deliberately extreme ("walk sideways", "walk backwards"): the model may nail it or degenerate — expect seed hunting.
+
+### Model quirks worth knowing
+
+- **The root wants to start near (0,0).** Kimodo is trained on origin-rooted data; sending a path offset by a few meters degrades the gait at the same seed — a swaying root path (up to ~0.8 m off the line) and duck-footed, "crab"-looking steps with the feet splayed ±40–55° while the torso faces forward. Auto Face Path centers the first waypoint on the model origin and translates the result back, so this is handled automatically — but if you ever send raw coordinates (Auto Face Path off, Auto-Origin off), keep waypoints near the world origin.
+- **Sparse waypoints leave freedom**: with only two waypoints several meters apart the root path can bow ~0.5–1.4 m off the straight line. The waypoints themselves are always hit exactly; tighten the path with more waypoints or *Sample Curve as Waypoints*.
+- **After the last waypoint the motion is unconstrained** — the character keeps walking. Put the final waypoint on the last frame of the clip, or trim the tail.
+- When diagnosing a weird gait numerically, measure the **feet** (e.g. heel→toe direction), not the shoulders: the "crab" above had perfectly aligned shoulders and pelvis while only the feet were splayed.
+
 ---
 
 ## Panel reference

@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.6.1] — 2026-09-23
+
+### Fixed
+
+- **Auto Face Path now also centers the path on the model's origin** — remote waypoints degraded the gait: Kimodo is trained on root-near-(0,0) data, and with the first waypoint sent ~3 m away the same seed that produced a clean walk produced a swaying path (up to 0.8 m off the line) with duck-footed, "crab"-looking steps (feet splayed ±40–55° while the torso faced forward). The waypoint transform is now `Rot(R)·(p − first_waypoint)` — direction fix plus origin centering — and the import bake is `Rot(−R)·p + first_waypoint`. Sidecars record a `"mode"` field; pre-1.6.1 sidecars (rotation about the in-place pivot) still import correctly via the legacy mode. Verified: two waypoints 3.3 m from the world origin, seed 42 — feet aligned 0–15° the whole clip, path deviation ≤ 0.10 m.
+
+## [1.6.0] — 2026-09-23
+
+### Added
+
+- **Auto Face Path — waypoints just work, no heading setup** (fork feature): Kimodo always starts a motion facing its canonical direction (−Y in Blender), so a path authored in any other direction either got a "crab walk" (no headings) or a ~1 s warm-up turn (with headings) — and a heading that contradicted the path direction made the motion degenerate. With **Auto Face Path** on (default, Motion Constraints → Settings), the addon rotates the Root XZ waypoints about the first one so the direction of travel matches the model's native facing, generates, and then bakes the inverse rotation back into the imported action's root bone — the character walks forward along your path from frame 1, the motion lands exactly on your world-space waypoints, and the armature object keeps an identity transform so retargeting is unaffected. The rotation parameters travel in a `.canonical.json` sidecar next to each BVH, so history re-imports un-rotate correctly too. Applies whenever every enabled constraint is a Root XZ waypoint; generation with fullbody/effector constraints is left untouched.
+- **Heading coverage is auto-filled while Auto Face Path is active**: Kimodo silently drops the entire heading list unless one is provided for *every* waypoint, so a single unticked "Include Heading" disabled them all. Under Auto Face Path, missing headings are now derived from the local direction of the path (and explicit ones are rotated along with the waypoints), so partial heading setups work.
+
+### Fixed
+
+- **Heading tooltip showed the wrong convention**: the field claimed "0 = +Y forward in Blender"; the actual model convention (verified empirically against generated motion) is 0° = −Y, 90° = +X, 180° = +Y, 270° = −X (angle = atan2(dx, −dy) of the facing vector — the same formula the curve sampler already used). The tooltip now states the real convention.
+
 ## [1.5.8] — 2026-08-20
 
 ### Changed
