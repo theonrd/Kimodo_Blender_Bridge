@@ -482,6 +482,50 @@ class KIMODO_PT_Generate(KIMODO_PanelBase, Panel):
 # Panel 3: Motion Constraints
 # ---------------------------------------------------------------------------
 
+def _heading_against_path(constraints, item, item_index):
+    """Warning text when the waypoint's heading faces >90° away from the
+    local path direction. Kimodo applies the heading list globally, so a
+    heading pointing against the path drags the whole root path sideways
+    (verified: a 0° default on an arrival-from-the-south waypoint bowed a
+    straight 3.4 m leg by ~1.3 m at the same seed).
+
+    item_index excludes the row itself — bpy collection wrappers don't have
+    stable identity, so `is not` comparisons can't do it.
+    """
+    if not item.marker_object:
+        return None
+    others = sorted(
+        ((i, c) for i, c in enumerate(constraints)
+         if i != item_index and c.enabled and c.marker_object
+         and c.constraint_type == 'root2d'),
+        key=lambda ic: ic[1].frame,
+    )
+    if not others:
+        return None
+    p0 = item.marker_object.location
+    prev = next((c for i, c in reversed(others) if c.frame <= item.frame), None)
+    nxt = next((c for i, c in others if c.frame >= item.frame), None)
+    # путь СКВОЗЬ точку: прибытие = item − prev, отбытие = next − item.
+    # Отрезки короче 5 см (пара «стоять на месте») направления не задают.
+    checks = []
+    if prev and prev.marker_object:
+        checks.append(("arrival", p0 - prev.marker_object.location))
+    if nxt and nxt.marker_object:
+        checks.append(("departure", nxt.marker_object.location - p0))
+    for label, d in checks:
+        if math.hypot(d.x, d.y) < 0.05:
+            continue
+        path_ang = math.atan2(d.x, -d.y)   # same convention as the field
+        diff = abs((item.heading_angle - path_ang + math.pi)
+                   % (2 * math.pi) - math.pi)
+        if diff > math.pi / 2:
+            return (f"Heading {math.degrees(item.heading_angle):.0f}° faces "
+                    f"against the path {label} here (path runs "
+                    f"{math.degrees(path_ang):.0f}°) — may bend the path; "
+                    f"verify or leave Heading off")
+    return None
+
+
 class KIMODO_PT_Constraints(KIMODO_PanelBase, Panel):
     bl_label   = "🎯  Motion Constraints"
     bl_idname  = "KIMODO_PT_Constraints"
@@ -604,6 +648,12 @@ class KIMODO_PT_Constraints(KIMODO_PanelBase, Panel):
 
             # root2d heading extras
             if ci.constraint_type == 'root2d':
+                if ci.include_heading:
+                    warn = _heading_against_path(s.motion_constraints, ci, i)
+                    if warn:
+                        wrow = box.row()
+                        wrow.alert = True
+                        wrow.label(text=warn, icon='ERROR')
                 sub2 = box.row(align=True)
                 sub2.prop(ci, "include_heading", text="Heading")
                 if ci.include_heading:

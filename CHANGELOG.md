@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.6.2] — 2026-09-24
+
+### Added
+
+- **UI warning for headings that face against the path**: Kimodo applies the heading list globally, and a heading pointing more than 90° away from the direction of travel at a waypoint bends the whole root path — a default 0° heading (facing −Y) on a waypoint arrived at from the south bowed a straight 3.4 m leg by ~1.3 m at the same seed; with the heading removed the deviation dropped to ~0.5 m. The Motion Constraints list now shows an inline alert on the waypoint, checking both the arrival and departure directions. Near-duplicate "stand here" pairs (segments under 5 cm) are treated as direction-less, so turning around at a standstill doesn't false-alarm.
+
 ## [1.6.1] — 2026-09-23
 
 ### Fixed
