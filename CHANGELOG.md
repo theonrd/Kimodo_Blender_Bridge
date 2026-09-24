@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.6.3] — 2026-09-24
+
+### Fixed
+
+- **Auto-filled headings no longer pick up direction from "stand here" pairs**: the geom fill for unticked waypoints used any segment longer than a millimeter, so the ~1 cm segment inside a near-duplicate standing pair produced a bogus perpendicular heading that also poisoned the carried-over angle for the waypoint before it. Now segments under 5 cm are treated as direction-less (same rule as the panel warning), and the angle carries over from the last real leg. Recommended way to turn at a standstill: tick Heading on the *second* waypoint of the pair — the whole turn then happens during the pause instead of mid-walk.
+
 ## [1.6.2] — 2026-09-24
 
 ### Added

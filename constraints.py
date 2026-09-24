@@ -601,8 +601,11 @@ def build_constraints_json(
                             ddx, ddz = b[0] - a[0], b[1] - a[1]
                             # θ = atan2(dx, dz) in Kimodo ground coords — the
                             # same convention as heading_angle_for_direction
-                            # (Kimodo Z = −Blender Y).
-                            if math.hypot(ddx, ddz) > 1e-9:
+                            # (Kimodo Z = −Blender Y).  Segments under 5 cm
+                            # ("stand here" pairs) carry no direction — skip
+                            # them so a degenerate delta can't poison the
+                            # carried-over angle.
+                            if math.hypot(ddx, ddz) > 0.05:
                                 last_geom = math.atan2(ddx, ddz)
                         geom[i] = last_geom
                     global_root_heading = [
